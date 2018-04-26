@@ -1,0 +1,108 @@
+ARG JAVA_VERSION=8
+
+FROM openjdk:${JAVA_VERSION}-alpine
+
+MAINTAINER Michael Haken michael.haken@outlook.com
+
+ARG FLUME_VERSION="1.8.0"
+ARG FLUME_PORT="44444"
+ARG FLUME_REPORTING_PORT="41414"
+ARG FLUME_AGENT_NAME="flume-agent"
+ARG FLUME_BASE_PATH="/opt/flume"
+ARG HADOOP_VERSION="2.9.0"
+ARG LOCAL_CONF_FILE="flume.conf"
+ARG ENTRY_POINT_FILE="entrypoint.sh"
+ARG FLUME_USER="flume"
+
+ENV PATH="${FLUME_BASE_PATH}/bin:${PATH}" \
+	FLUME_HOME="${FLUME_BASE_PATH}" \
+	FLUME_CLASSPATH="${FLUME_BASE_PATH}/lib/*" \
+	FLUME_AGENT_NAME="${FLUME_AGENT_NAME}" \
+	FLUME_CONF_DIR="${FLUME_BASE_PATH}/conf" \
+	FLUME_CONF_FILE="${FLUME_BASE_PATH}/conf/flume.conf" \
+	FLUME_REPORTING_PORT="${FLUME_REPORTING_PORT}" \
+	FLUME_USER="${FLUME_USER}"
+
+# Setup the OS
+RUN apk update \
+	&& apk add --no-cache wget bash su-exec
+
+# Get the Flume binaries
+RUN mkdir -p "${FLUME_HOME}" \
+	#
+	# Make sure all environment variables are set and propogated
+	#
+	&& echo "export JAVA_HOME=${JAVA_HOME}" > /etc/profile.d/java.sh \
+	&& echo "export FLUME_HOME=${HIVE_HOME}" > /etc/profile.d/flume.sh \
+	&& echo "export PATH=${PATH}" > /etc/profile.d/path.sh \
+	# -O- output payload to stdout, and use -q to supress all wget
+	# output, so only tar file is sent down the pipeline
+	&& wget -qO- "http://archive.apache.org/dist/flume/${FLUME_VERSION}/apache-flume-${FLUME_VERSION}-bin.tar.gz" \
+	# Use --strip 1 to remove the first folder from the file names
+	# which is apache-flume-"${FLUME_VERSION}"-bin so that we properly create the
+	# folder structure in /opt/flume
+	# -f - specifies that the archive location is from the pipeline
+	| tar -zxv -f - --directory "${FLUME_HOME}" --strip 1 \
+	#
+	# Add the group and user for running flume services
+	# -S = system
+	#
+	&& addgroup -S flume \
+	#
+	# -S = system
+	# -G = add to existing group
+	# -s = shell
+	# -D = don't assign password
+	# -g = GECOS
+	# -h = home directory
+	# -H = don't create home directory
+	# -u = User id
+	# -k = skeleton directory
+	#
+	&& adduser -S -G "${FLUME_USER}" -D -s /sbin/nologin "${FLUME_USER}" \
+	#
+	# Add these environment variables for flume to use from bash
+	#
+	&& echo "export FLUME_HOME=${FLUME_HOME}" >> /home/"${FLUME_USER}"/.bashrc \
+	&& echo "export PATH=${PATH}" >> /home/"${FLUME_USER}"/.bashrc \
+	&& echo "export JAVA_HOME=${JAVA_HOME}" >> /home/"${FLUME_USER}"/.bashrc \
+	#
+	# Add these environment variables for flume to use from sh
+	#
+	&& echo "export FLUME_HOME=${HIVE_HOME}" >> /home/"${FLUME_USER}"/.profile \
+	&& echo "export PATH=${PATH}" >> /home/"${FLUME_USER}"/.profile \
+	&& echo "export JAVA_HOME=${JAVA_HOME}" >> /home/"${FLUME_USER}"/.profile 
+
+# Get the hadoop binaries
+RUN wget -qO- "http://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz" \
+	| tar -zxv -f - --directory "/tmp"
+	
+# Copy only the hadoop jar files to the flume lib path so it can use hdfs as a source/sink
+RUN cp /tmp/hadoop-"${HADOOP_VERSION}"/share/hadoop/common/*.jar "${FLUME_BASE_PATH}/lib/" \
+	&& cp /tmp/hadoop-"${HADOOP_VERSION}"/share/hadoop/common/lib/*.jar "${FLUME_BASE_PATH}/lib/" \
+	&& rm -rf /tmp/hadoop-"${HADOOP_VERSION}" 
+
+# Copy over the flume configuration and entrypoint script
+COPY "${LOCAL_CONF_FILE}" "${FLUME_CONF_FILE}"
+COPY "${ENTRY_POINT_FILE}" "/var/flume/entrypoint.sh"
+
+# Update the config file and set permissions
+RUN sed -i "s/FLUME_AGENT_NAME/${FLUME_AGENT_NAME}/g" "${FLUME_CONF_FILE}" \
+	#
+	# Make sure the flume user owns all of the necessary directories
+    #
+	&& chown -R "${FLUME_USER}":flume "${FLUME_HOME}" \
+	&& chmod -R 0774 "${FLUME_HOME}"
+
+# Perform cleanup
+RUN apk del wget
+
+# Set the working directory to flume
+WORKDIR "${FLUME_HOME}"
+
+# 44444 is the flume port
+# 41414 is the reporting http endpoint
+EXPOSE "${FLUME_PORT}" "${FLUME_REPORTING_PORT}"
+
+# Run the entrypoint script
+ENTRYPOINT ["/var/flume/entrypoint.sh"]
